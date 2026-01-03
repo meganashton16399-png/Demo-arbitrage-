@@ -10,7 +10,7 @@ import pandas_ta as ta
 # --- CONFIGURATION ---
 APP_ID = 119348
 API_TOKEN = "6D17WOjBDvq51Dz"  # Aapka Token
-TELE_TOKEN = "8472550297:AAHcUTrMrvuxbDs3tAiFojzVp-BCM4Puc9s" # Apna Token (Colon : wala) dalo
+TELE_TOKEN = "8472550297:AAEQkCa7zakwmRmw4sItW_Q_otmIUwZErvY" # Apna Token (Colon : wala) dalo
 MY_CHAT_ID = "8559974035"    # Apni Chat ID
 
 bot = telebot.TeleBot(TELE_TOKEN)
