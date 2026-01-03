@@ -10,11 +10,11 @@ from threading import Thread
 import pandas as pd
 import pandas_ta as ta
 
-# --- 1. CONFIGURATION ---
-APP_ID = 119348
-API_TOKEN = "dAAoqrFfnEKGXi4" # ✅ New Token
-TELE_TOKEN = "8472550297:AAFWMdHQe2EtXAlQcbelOSmV6QoSaQiubh8" # ✅ New Bot Token
-MY_CHAT_ID = "8559974035"
+# --- 1. NEW CREDENTIALS ---
+APP_ID = 119348  # Generic App ID
+API_TOKEN = "3QNHozkAw8IhdMV" # ✅ Updated Deriv Token
+TELE_TOKEN = "8472550297:AAE05TUxFHedmwh8g0hrx4EnNjFaCo_LJ8E" # ✅ Updated Bot Token
+MY_CHAT_ID = "8559974035" 
 
 bot = telebot.TeleBot(TELE_TOKEN)
 app = Flask(__name__)
@@ -22,22 +22,23 @@ app = Flask(__name__)
 # Global Variables
 is_trading = False
 SELECTED_SYMBOL = ""
-current_lot = 0.50 
-multiplier = 2.3 # ✅ Aggressive Recovery (Pehle 2.1 tha)
+current_stake = 1.0  # Starting Stake $1
+multiplier_val = 100 # Leverage x100
+martingale_factor = 2.0 # Loss recovery multiplier
 ticks_history = []
 ws_connected = False 
-show_balance_once = False # Flag to control balance spam
+is_position_open = False # Strict rule: 1 trade at a time
 
+# ✅ ASSETS (Use Bitcoin for Weekend)
 ASSETS = {
-    "Volatility 100 (1s) Index": "1HZ100V",
-    "Bitcoin (BTCUSD)": "cryBTCUSD",
-    "Gold (XAUUSD)": "frxXAUUSD"
+    "Bitcoin (BTCUSD)": "cryBTCUSD", 
+    "Gold (XAUUSD)": "frxXAUUSD"     
 }
 
 # --- 2. UPTIME SERVER ---
 @app.route('/')
 def home():
-    return "Bot is Silent & Trading!"
+    return "Bot is Live! Strategy: Multipliers."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -47,31 +48,39 @@ def keep_alive():
     t = Thread(target=run_web_server)
     t.start()
 
-# --- 3. TRADING LOGIC ---
+# --- 3. TRADING LOGIC (Trend + Momentum) ---
 def get_bias():
     global ticks_history
     if len(ticks_history) < 20: return None 
     
     df = pd.DataFrame(ticks_history, columns=['close'])
+    
+    # EMA Crossover
     ema9 = ta.ema(df['close'], length=9).iloc[-1]
     ema21 = ta.ema(df['close'], length=21).iloc[-1]
+    
+    # RSI
     rsi = ta.rsi(df['close'], length=14).iloc[-1]
+    
     current = df['close'].iloc[-1]
     prev = df['close'].iloc[-2]
 
-    buy_vote = 0
-    sell_vote = 0
+    buy_score = 0
+    sell_score = 0
     
-    if ema9 > ema21: buy_vote += 1
-    else: sell_vote += 1
-    if rsi > 50: buy_vote += 1
-    else: sell_vote += 1
-    if current > prev: buy_vote += 1
-    else: sell_vote += 1
+    if ema9 > ema21: buy_score += 1
+    else: sell_score += 1
+    
+    if rsi > 50: buy_score += 1
+    else: sell_score += 1
+    
+    if current > prev: buy_score += 1
+    else: sell_score += 1
 
-    if buy_vote >= 2: return "buy"
-    if sell_vote >= 2: return "sell"
-    return "buy"
+    # Need 2 out of 3 confirmations
+    if buy_score >= 2: return "buy"
+    if sell_score >= 2: return "sell"
+    return None
 
 # --- 4. DERIV HANDLERS ---
 def on_open(ws):
@@ -81,84 +90,90 @@ def on_open(ws):
     ws.send(json.dumps(auth_data))
 
 def on_message(ws, message):
-    global ticks_history, current_lot, show_balance_once
+    global ticks_history, current_stake, is_position_open
     try:
         data = json.loads(message)
 
         if 'error' in data:
-            bot.send_message(MY_CHAT_ID, f"❌ API Error: {data['error']['message']}")
+            err_msg = data['error']['message']
+            bot.send_message(MY_CHAT_ID, f"⚠️ Error: {err_msg}")
+            if "Market is closed" in err_msg:
+                is_position_open = False
             return
 
-        # ✅ FIXED: Balance sirf tab dikhayega jab maanga jayega
         if 'balance' in data:
-            if show_balance_once:
-                bal = data['balance']['balance']
-                curr = data['balance']['currency']
-                bot.send_message(MY_CHAT_ID, f"💰 Wallet Balance: {bal} {curr}")
-                show_balance_once = False # Reset flag
+            bal = data['balance']['balance']
+            # Balance spam rokne ke liye yahan print nahi kar rahe, /bal command se milega
 
         if 'tick' in data:
             price = data['tick']['quote']
             ticks_history.append(price)
             if len(ticks_history) > 100: ticks_history.pop(0)
 
-        # ✅ TRADE RESULT (User Requested Format)
+        # ✅ TRADE RESULT MONITORING
         if 'proposal_open_contract' in data:
             contract = data['proposal_open_contract']
+            
+            # Jab Trade Close ho (TP/SL Hit)
             if contract['is_sold']:
-                profit = float(contract['profit'])
-                trade_type = contract['contract_type']
-                buy_price = contract['buy_price']
+                is_position_open = False # ✅ Ready for next trade
                 
-                bias_str = "⬆️ CALL" if trade_type == "CALL" else "⬇️ PUT"
+                profit = float(contract['profit'])
                 
                 if profit > 0:
-                    status = "🟢 WIN"
-                    current_lot = 0.50 # Reset to Base
+                    status = "🟢 TP HIT (WIN)"
+                    current_stake = 1.0 # Reset to $1
                 else:
-                    status = "🔴 LOSS"
-                    current_lot = round(current_lot * multiplier, 2) # Martingale x2.3
-
-                # Clean Message Format
-                msg = (f"{status} | {bias_str}\n"
-                       f"💵 Lot: ${buy_price}\n"
-                       f"📊 P/L: ${profit}\n"
-                       f"🔜 Next: ${current_lot}")
+                    status = "🔴 SL HIT (LOSS)"
+                    current_stake = round(current_stake * martingale_factor, 2) # Double for recovery
                 
+                msg = (f"{status}\n"
+                       f"📊 Profit/Loss: ${profit}\n"
+                       f"🔄 Next Stake: ${current_stake}")
                 bot.send_message(MY_CHAT_ID, msg)
 
     except Exception as e:
         print(f"Error: {e}")
 
 def place_order(ws, direction, amount):
+    global is_position_open
     try:
+        # ✅ STRATEGY: Take Profit @ 60% | Stop Loss @ 80%
+        take_profit_amt = round(amount * 0.6, 2)
+        stop_loss_amt = round(amount * 0.8, 2)
+        
         trade_msg = {
             "buy": 1,
             "price": amount,
             "parameters": {
                 "amount": amount,
                 "basis": "stake",
-                "contract_type": "CALL" if direction == "buy" else "PUT",
+                "contract_type": "multiplier", # REAL TRADING
                 "currency": "USD",
                 "symbol": SELECTED_SYMBOL,
-                "duration": 5,
-                "duration_unit": "t"
+                "multiplier": multiplier_val,
+                "take_profit": take_profit_amt,
+                "stop_loss": stop_loss_amt
             }
         }
         ws.send(json.dumps(trade_msg))
+        is_position_open = True # Lock trade
+        bot.send_message(MY_CHAT_ID, f"🔫 Entry: {direction.upper()}\nStake: ${amount} (x{multiplier_val})\nTP: +${take_profit_amt} | SL: -${stop_loss_amt}")
+        
     except Exception as e:
-        bot.send_message(MY_CHAT_ID, f"⚠️ Trade Fail: {e}")
+        bot.send_message(MY_CHAT_ID, f"⚠️ Order Fail: {e}")
+        is_position_open = False
 
 # --- 5. COMMANDS ---
 @bot.message_handler(commands=['trade'])
 def ask_asset(message):
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
-    markup.add("Volatility 100 (1s) Index", "Bitcoin (BTCUSD)")
-    bot.send_message(message.chat.id, "Select Asset:", reply_markup=markup)
+    markup.add("Bitcoin (BTCUSD)", "Gold (XAUUSD)")
+    bot.send_message(message.chat.id, "Select Market (Weekend = Bitcoin):", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ASSETS.keys())
 def start_bot(message):
-    global is_trading, SELECTED_SYMBOL, current_lot, ticks_history
+    global is_trading, SELECTED_SYMBOL, current_stake, ticks_history, is_position_open
     if is_trading:
         bot.send_message(message.chat.id, "Bot already running!")
         return
@@ -166,22 +181,19 @@ def start_bot(message):
     SELECTED_SYMBOL = ASSETS[message.text]
     is_trading = True
     ticks_history = [] 
-    current_lot = 0.50
+    current_stake = 1.0 # Reset stake on new start
+    is_position_open = False
     
-    bot.send_message(message.chat.id, f"🚀 Launching {SELECTED_SYMBOL}...", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, f"🚀 Real Strategy Active: {SELECTED_SYMBOL}\nWaiting for Entry Signal...", reply_markup=types.ReplyKeyboardRemove())
     threading.Thread(target=trading_loop).start()
 
-# ✅ FIXED: /bal command logic
 @bot.message_handler(commands=['bal'])
 def check_balance(message):
-    global show_balance_once
     if not ws_connected:
-        bot.reply_to(message, "⚠️ Bot is disconnected. Start /trade first.")
+        bot.reply_to(message, "⚠️ Bot disconnected. Start /trade first.")
         return
-    
-    show_balance_once = True # Allow printing balance once
-    bot.reply_to(message, "🏦 Fetching Balance...")
-    # WebSocket loop handle karega request ko, humein bas wait karna hai next update ka
+    bot.reply_to(message, "🏦 Checking Balance...")
+    # WebSocket response will be handled in loop
 
 @bot.message_handler(commands=['stop'])
 def stop_bot(message):
@@ -191,7 +203,7 @@ def stop_bot(message):
 
 # --- 6. MAIN LOOP ---
 def trading_loop():
-    global is_trading, ws_connected
+    global is_trading, ws_connected, is_position_open
     
     ws = websocket.WebSocketApp(f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}", 
                                 on_open=on_open, on_message=on_message)
@@ -202,29 +214,26 @@ def trading_loop():
     
     time.sleep(3)
     ws.send(json.dumps({"ticks": SELECTED_SYMBOL, "subscribe": 1}))
-    ws.send(json.dumps({"proposal_open_contract": 1, "subscribe": 1}))
-    # Subscribe balance stream so we always have data when requested
-    ws.send(json.dumps({"balance": 1, "subscribe": 1})) 
-
-    bot.send_message(MY_CHAT_ID, "📡 Gathering Data...")
-    data_ready_sent = False
+    ws.send(json.dumps({"proposal_open_contract": 1, "subscribe": 1})) # Listen for trade Close
+    ws.send(json.dumps({"balance": 1, "subscribe": 1}))
 
     while is_trading:
         try:
+            # 1. Agar Trade Open hai, toh Intezaar karo (Strict Rule)
+            if is_position_open:
+                time.sleep(1)
+                continue
+
+            # 2. Data Collection (Need 20 ticks for EMA)
             if len(ticks_history) < 20:
-                if len(ticks_history) > 0 and len(ticks_history) % 5 == 0:
-                    bot.send_message(MY_CHAT_ID, f"⏳ Loading Data: {len(ticks_history)}/20...")
-                    time.sleep(2) 
                 time.sleep(1)
                 continue
             
-            if not data_ready_sent:
-                bot.send_message(MY_CHAT_ID, "✅ Data Full! Trading Started... 🔫")
-                data_ready_sent = True
-
+            # 3. Analysis & Entry
             bias = get_bias()
             if bias:
-                place_order(ws, bias, current_lot)
+                place_order(ws, bias, current_stake)
+                time.sleep(10) # Thoda pause taaki order process ho jaye
             
             time.sleep(1) 
             
