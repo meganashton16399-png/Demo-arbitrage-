@@ -10,11 +10,11 @@ from threading import Thread
 import pandas as pd
 import pandas_ta as ta
 
-# --- 1. CONFIGURATION ---
-APP_ID = 119348
-API_TOKEN = "6D17WOjBDvq51Dz"
-TELE_TOKEN = "8472550297:AAGylw6wRt-k6Y-ASzDKZCE-ExnI77yJSlU"
-MY_CHAT_ID = "8559974035"
+# --- 1. NEW CONFIGURATION ---
+APP_ID = 119348  # ✅ Ye Generic ID hai, har account pe chalti hai
+API_TOKEN = "d6jWOdj2UJAkg1Q" # ✅ New Deriv Token Updated
+TELE_TOKEN = "8472550297:AAGFnGBP51Yv1EH4k3USQvTqvIzA6KEm0k8" # ✅ New Bot Token Updated
+MY_CHAT_ID = "8559974035" # ✅ Aapka Purana Chat ID (Agar Telegram account wahi hai to ye same rahega)
 
 bot = telebot.TeleBot(TELE_TOKEN)
 app = Flask(__name__)
@@ -28,7 +28,7 @@ ticks_history = []
 ws_connected = False 
 
 ASSETS = {
-    "Volatility 100 (1s) Index": "1HZ100V", 
+    "Volatility 100 (1s) Index": "1HZ100V", # MACHINE GUN ASSET
     "Bitcoin (BTCUSD)": "cryBTCUSD",
     "Gold (XAUUSD)": "frxXAUUSD"
 }
@@ -36,7 +36,7 @@ ASSETS = {
 # --- 2. UPTIME SERVER ---
 @app.route('/')
 def home():
-    return "Bot is Alive! Fixed Ping Issue."
+    return "Bot is Alive! New Tokens Updated."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -46,7 +46,7 @@ def keep_alive():
     t = Thread(target=run_web_server)
     t.start()
 
-# --- 3. TRADING LOGIC ---
+# --- 3. TRADING LOGIC (2/3 Confirmation) ---
 def get_bias():
     global ticks_history
     if len(ticks_history) < 20: return None 
@@ -76,6 +76,7 @@ def get_bias():
 def on_open(ws):
     global ws_connected
     ws_connected = True
+    # Auth with NEW Token
     auth_data = {"authorize": API_TOKEN}
     ws.send(json.dumps(auth_data))
 
@@ -88,6 +89,12 @@ def on_message(ws, message):
             bot.send_message(MY_CHAT_ID, f"❌ API Error: {data['error']['message']}")
             return
 
+        # Balance Check Response
+        if 'balance' in data:
+            bal = data['balance']['balance']
+            curr = data['balance']['currency']
+            bot.send_message(MY_CHAT_ID, f"💰 Wallet Balance: {bal} {curr}")
+
         if 'tick' in data:
             price = data['tick']['quote']
             ticks_history.append(price)
@@ -97,11 +104,23 @@ def on_message(ws, message):
             contract = data['proposal_open_contract']
             if contract['is_sold']:
                 profit = float(contract['profit'])
+                trade_type = contract['contract_type']
+                buy_price = contract['buy_price']
+                
+                bias_str = "⬆️ CALL" if trade_type == "CALL" else "⬇️ PUT"
+                
                 if profit > 0:
-                    current_lot = 0.50
+                    status = "🟢 WIN"
+                    current_lot = 0.50 # Reset
                 else:
+                    status = "🔴 LOSS"
                     current_lot = round(current_lot * multiplier, 2)
-                    bot.send_message(MY_CHAT_ID, f"💔 LOSS! Next: {current_lot}")
+
+                msg = (f"{status} | {bias_str}\n"
+                       f"💵 Lot: ${buy_price}\n"
+                       f"📊 P/L: ${profit}\n"
+                       f"🔜 Next Lot: ${current_lot}")
+                bot.send_message(MY_CHAT_ID, msg)
 
     except Exception as e:
         print(f"Error: {e}")
@@ -144,8 +163,12 @@ def start_bot(message):
     ticks_history = [] 
     current_lot = 0.50
     
-    bot.send_message(message.chat.id, f"🚀 Launching {SELECTED_SYMBOL}...", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, f"🚀 Launching {SELECTED_SYMBOL} with NEW Credentials...", reply_markup=types.ReplyKeyboardRemove())
     threading.Thread(target=trading_loop).start()
+
+@bot.message_handler(commands=['bal'])
+def check_balance(message):
+    bot.reply_to(message, "Note: Balance trade chalte waqt agle tick pe update hoga.")
 
 @bot.message_handler(commands=['stop'])
 def stop_bot(message):
@@ -153,15 +176,13 @@ def stop_bot(message):
     is_trading = False
     bot.reply_to(message, "🛑 Stopped.")
 
-# --- 6. MAIN LOOP (FIXED) ---
+# --- 6. MAIN LOOP ---
 def trading_loop():
     global is_trading, ws_connected
     
-    # ✅ FIX: Removed ping_interval from here
     ws = websocket.WebSocketApp(f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}", 
                                 on_open=on_open, on_message=on_message)
     
-    # ✅ FIX: Moved ping_interval to run_forever using kwargs
     wst = threading.Thread(target=ws.run_forever, kwargs={'ping_interval': 30, 'ping_timeout': 10})
     wst.daemon = True
     wst.start()
@@ -170,7 +191,9 @@ def trading_loop():
     ws.send(json.dumps({"ticks": SELECTED_SYMBOL, "subscribe": 1}))
     ws.send(json.dumps({"proposal_open_contract": 1, "subscribe": 1}))
     
-    # Initial status
+    # Auto-Check Balance on Start
+    ws.send(json.dumps({"balance": 1, "subscribe": 1}))
+
     bot.send_message(MY_CHAT_ID, "📡 Gathering Data...")
     data_ready_sent = False
 
@@ -184,7 +207,7 @@ def trading_loop():
                 continue
             
             if not data_ready_sent:
-                bot.send_message(MY_CHAT_ID, "✅ Data Full! Machine Gun Mode ON 🔫")
+                bot.send_message(MY_CHAT_ID, "✅ Data Full! Trading Started... 🔫")
                 data_ready_sent = True
 
             bias = get_bias()
