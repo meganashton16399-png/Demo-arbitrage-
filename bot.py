@@ -10,10 +10,10 @@ from threading import Thread
 import pandas as pd
 import pandas_ta as ta
 
-# --- 1. CREDENTIALS (Hardcoded) ---
+# --- 1. CONFIGURATION ---
 APP_ID = 119348
 API_TOKEN = "6D17WOjBDvq51Dz"
-TELE_TOKEN = "8472550297:AAGrvw8WxoZdGLBFSIyRyzH3m4QU5bghkqg"
+TELE_TOKEN = "8472550297:AAF2JSnAvc3eSdi0zMBKVFL4ptOWVNAWNPM"
 MY_CHAT_ID = "8559974035"
 
 bot = telebot.TeleBot(TELE_TOKEN)
@@ -27,8 +27,9 @@ multiplier = 2.1
 ticks_history = []
 ws_connected = False 
 
+# ✅ CHANGE 1: Correct 1-Second Symbol
 ASSETS = {
-    "Volatility 100 (1s) Index": "R_100", # BEST FOR WEEKEND
+    "Volatility 100 (1s) Index": "1HZ100V", # Ye hai asli Machine Gun Asset
     "Bitcoin (BTCUSD)": "cryBTCUSD",
     "Gold (XAUUSD)": "frxXAUUSD"
 }
@@ -36,7 +37,7 @@ ASSETS = {
 # --- 2. UPTIME SERVER ---
 @app.route('/')
 def home():
-    return "Bot is Alive! Fix Applied."
+    return "Bot is Alive! 1HZ100V Active."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -46,7 +47,7 @@ def keep_alive():
     t = Thread(target=run_web_server)
     t.start()
 
-# --- 3. TRADING LOGIC (2/3 Confirmation) ---
+# --- 3. TRADING LOGIC ---
 def get_bias():
     global ticks_history
     if len(ticks_history) < 20: return None 
@@ -75,23 +76,9 @@ def get_bias():
 # --- 4. DERIV HANDLERS ---
 def on_open(ws):
     global ws_connected
-    print("✅ Websocket Connected!")
     ws_connected = True
     auth_data = {"authorize": API_TOKEN}
     ws.send(json.dumps(auth_data))
-    bot.send_message(MY_CHAT_ID, "✅ Server Connected! Logging in...")
-
-def on_error(ws, error):
-    print(f"❌ Error: {error}")
-    try:
-        bot.send_message(MY_CHAT_ID, f"⚠️ Connection Error: {error}")
-    except:
-        pass
-
-def on_close(ws, close_status_code, close_msg):
-    global ws_connected
-    ws_connected = False
-    print("⚠️ Connection Closed")
 
 def on_message(ws, message):
     global ticks_history, current_lot
@@ -99,12 +86,12 @@ def on_message(ws, message):
         data = json.loads(message)
 
         if 'error' in data:
-            error_msg = data['error']['message']
-            bot.send_message(MY_CHAT_ID, f"❌ API Error: {error_msg}")
+            bot.send_message(MY_CHAT_ID, f"❌ API Error: {data['error']['message']}")
             return
 
         if 'authorize' in data:
-            bot.send_message(MY_CHAT_ID, "🔐 Login Success! Ready.")
+            # Login successful
+            pass
 
         if 'tick' in data:
             price = data['tick']['quote']
@@ -117,20 +104,19 @@ def on_message(ws, message):
                 profit = float(contract['profit'])
                 if profit > 0:
                     current_lot = 0.50
-                    # bot.send_message(MY_CHAT_ID, f"✅ WIN! Profit: ${profit}")
+                    # bot.send_message(MY_CHAT_ID, "✅ WIN")
                 else:
                     current_lot = round(current_lot * multiplier, 2)
-                    bot.send_message(MY_CHAT_ID, f"💔 LOSS! Next Stake: {current_lot}")
+                    bot.send_message(MY_CHAT_ID, f"💔 LOSS! Next: {current_lot}")
 
     except Exception as e:
-        print(f"Msg Error: {e}")
+        print(f"Error: {e}")
 
 def place_order(ws, direction, amount):
     try:
-        # --- FIXED CODE HERE ---
         trade_msg = {
             "buy": 1,
-            "price": amount,  # ✅ FIX: Ye line add ki hai
+            "price": amount, # Safety Check
             "parameters": {
                 "amount": amount,
                 "basis": "stake",
@@ -142,16 +128,15 @@ def place_order(ws, direction, amount):
             }
         }
         ws.send(json.dumps(trade_msg))
-        print(f"Order Sent: {direction} @ {amount}")
     except Exception as e:
-        bot.send_message(MY_CHAT_ID, f"⚠️ Order Code Fail: {e}")
+        bot.send_message(MY_CHAT_ID, f"⚠️ Trade Fail: {e}")
 
-# --- 5. TELEGRAM COMMANDS ---
+# --- 5. COMMANDS ---
 @bot.message_handler(commands=['trade'])
 def ask_asset(message):
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
     markup.add("Volatility 100 (1s) Index", "Bitcoin (BTCUSD)")
-    bot.send_message(message.chat.id, "Select Asset (Use Volatility 100):", reply_markup=markup)
+    bot.send_message(message.chat.id, "Select Asset:", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ASSETS.keys())
 def start_bot(message):
@@ -165,7 +150,7 @@ def start_bot(message):
     ticks_history = [] 
     current_lot = 0.50
     
-    bot.send_message(message.chat.id, f"🚀 Starting {SELECTED_SYMBOL}...", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, f"🚀 Launching {SELECTED_SYMBOL} (High Speed)...", reply_markup=types.ReplyKeyboardRemove())
     threading.Thread(target=trading_loop).start()
 
 @bot.message_handler(commands=['stop'])
@@ -178,30 +163,40 @@ def stop_bot(message):
 def trading_loop():
     global is_trading, ws_connected
     
+    # ✅ CHANGE 3: Ping Interval added to keep connection alive
     ws = websocket.WebSocketApp(f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}", 
-                                on_open=on_open, 
-                                on_message=on_message,
-                                on_error=on_error,
-                                on_close=on_close)
-    
+                                on_open=on_open, on_message=on_message,
+                                ping_interval=30, ping_timeout=10)
     wst = threading.Thread(target=ws.run_forever)
     wst.daemon = True
     wst.start()
     
-    # Wait for connection
-    time.sleep(5)
-    
-    # Subscribe
+    time.sleep(3)
     ws.send(json.dumps({"ticks": SELECTED_SYMBOL, "subscribe": 1}))
     ws.send(json.dumps({"proposal_open_contract": 1, "subscribe": 1}))
-    bot.send_message(MY_CHAT_ID, "📡 Gathering data...")
+    
+    # Initial status
+    bot.send_message(MY_CHAT_ID, "📡 Gathering Data...")
+    
+    data_ready_sent = False
 
     while is_trading:
         try:
+            # Data Collection Phase
             if len(ticks_history) < 20:
+                # ✅ CHANGE 2: Progress Update every 5 ticks
+                if len(ticks_history) > 0 and len(ticks_history) % 5 == 0:
+                    bot.send_message(MY_CHAT_ID, f"⏳ Loading Data: {len(ticks_history)}/20...")
+                    time.sleep(2) 
                 time.sleep(1)
                 continue
+            
+            # Start Trading
+            if not data_ready_sent:
+                bot.send_message(MY_CHAT_ID, "✅ Data Full! Machine Gun Mode ON 🔫")
+                data_ready_sent = True
 
+            # Execute Logic
             bias = get_bias()
             if bias:
                 place_order(ws, bias, current_lot)
@@ -209,7 +204,6 @@ def trading_loop():
             time.sleep(1) # 1 Sec Interval
             
         except Exception as e:
-            print(f"Loop Error: {e}")
             time.sleep(5)
     
     ws.close()
