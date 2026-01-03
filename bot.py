@@ -10,11 +10,11 @@ from threading import Thread
 import pandas as pd
 import pandas_ta as ta
 
-# --- 1. NEW CONFIGURATION ---
-APP_ID = 119348  # ✅ Ye Generic ID hai, har account pe chalti hai
-API_TOKEN = "d6jWOdj2UJAkg1Q" # ✅ New Deriv Token Updated
-TELE_TOKEN = "8472550297:AAGFnGBP51Yv1EH4k3USQvTqvIzA6KEm0k8" # ✅ New Bot Token Updated
-MY_CHAT_ID = "8559974035" # ✅ Aapka Purana Chat ID (Agar Telegram account wahi hai to ye same rahega)
+# --- 1. CONFIGURATION ---
+APP_ID = 119348
+API_TOKEN = "d6jWOdj2UJAkg1Q" # ✅ New Token
+TELE_TOKEN = "8472550297:AAGFnGBP51Yv1EH4k3USQvTqvIzA6KEm0k8" # ✅ New Bot Token
+MY_CHAT_ID = "8559974035"
 
 bot = telebot.TeleBot(TELE_TOKEN)
 app = Flask(__name__)
@@ -23,12 +23,13 @@ app = Flask(__name__)
 is_trading = False
 SELECTED_SYMBOL = ""
 current_lot = 0.50 
-multiplier = 2.1
+multiplier = 2.3 # ✅ Aggressive Recovery (Pehle 2.1 tha)
 ticks_history = []
 ws_connected = False 
+show_balance_once = False # Flag to control balance spam
 
 ASSETS = {
-    "Volatility 100 (1s) Index": "1HZ100V", # MACHINE GUN ASSET
+    "Volatility 100 (1s) Index": "1HZ100V",
     "Bitcoin (BTCUSD)": "cryBTCUSD",
     "Gold (XAUUSD)": "frxXAUUSD"
 }
@@ -36,7 +37,7 @@ ASSETS = {
 # --- 2. UPTIME SERVER ---
 @app.route('/')
 def home():
-    return "Bot is Alive! New Tokens Updated."
+    return "Bot is Silent & Trading!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -46,7 +47,7 @@ def keep_alive():
     t = Thread(target=run_web_server)
     t.start()
 
-# --- 3. TRADING LOGIC (2/3 Confirmation) ---
+# --- 3. TRADING LOGIC ---
 def get_bias():
     global ticks_history
     if len(ticks_history) < 20: return None 
@@ -76,12 +77,11 @@ def get_bias():
 def on_open(ws):
     global ws_connected
     ws_connected = True
-    # Auth with NEW Token
     auth_data = {"authorize": API_TOKEN}
     ws.send(json.dumps(auth_data))
 
 def on_message(ws, message):
-    global ticks_history, current_lot
+    global ticks_history, current_lot, show_balance_once
     try:
         data = json.loads(message)
 
@@ -89,17 +89,20 @@ def on_message(ws, message):
             bot.send_message(MY_CHAT_ID, f"❌ API Error: {data['error']['message']}")
             return
 
-        # Balance Check Response
+        # ✅ FIXED: Balance sirf tab dikhayega jab maanga jayega
         if 'balance' in data:
-            bal = data['balance']['balance']
-            curr = data['balance']['currency']
-            bot.send_message(MY_CHAT_ID, f"💰 Wallet Balance: {bal} {curr}")
+            if show_balance_once:
+                bal = data['balance']['balance']
+                curr = data['balance']['currency']
+                bot.send_message(MY_CHAT_ID, f"💰 Wallet Balance: {bal} {curr}")
+                show_balance_once = False # Reset flag
 
         if 'tick' in data:
             price = data['tick']['quote']
             ticks_history.append(price)
             if len(ticks_history) > 100: ticks_history.pop(0)
 
+        # ✅ TRADE RESULT (User Requested Format)
         if 'proposal_open_contract' in data:
             contract = data['proposal_open_contract']
             if contract['is_sold']:
@@ -111,15 +114,17 @@ def on_message(ws, message):
                 
                 if profit > 0:
                     status = "🟢 WIN"
-                    current_lot = 0.50 # Reset
+                    current_lot = 0.50 # Reset to Base
                 else:
                     status = "🔴 LOSS"
-                    current_lot = round(current_lot * multiplier, 2)
+                    current_lot = round(current_lot * multiplier, 2) # Martingale x2.3
 
+                # Clean Message Format
                 msg = (f"{status} | {bias_str}\n"
                        f"💵 Lot: ${buy_price}\n"
                        f"📊 P/L: ${profit}\n"
-                       f"🔜 Next Lot: ${current_lot}")
+                       f"🔜 Next: ${current_lot}")
+                
                 bot.send_message(MY_CHAT_ID, msg)
 
     except Exception as e:
@@ -163,12 +168,20 @@ def start_bot(message):
     ticks_history = [] 
     current_lot = 0.50
     
-    bot.send_message(message.chat.id, f"🚀 Launching {SELECTED_SYMBOL} with NEW Credentials...", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, f"🚀 Launching {SELECTED_SYMBOL}...", reply_markup=types.ReplyKeyboardRemove())
     threading.Thread(target=trading_loop).start()
 
+# ✅ FIXED: /bal command logic
 @bot.message_handler(commands=['bal'])
 def check_balance(message):
-    bot.reply_to(message, "Note: Balance trade chalte waqt agle tick pe update hoga.")
+    global show_balance_once
+    if not ws_connected:
+        bot.reply_to(message, "⚠️ Bot is disconnected. Start /trade first.")
+        return
+    
+    show_balance_once = True # Allow printing balance once
+    bot.reply_to(message, "🏦 Fetching Balance...")
+    # WebSocket loop handle karega request ko, humein bas wait karna hai next update ka
 
 @bot.message_handler(commands=['stop'])
 def stop_bot(message):
@@ -190,9 +203,8 @@ def trading_loop():
     time.sleep(3)
     ws.send(json.dumps({"ticks": SELECTED_SYMBOL, "subscribe": 1}))
     ws.send(json.dumps({"proposal_open_contract": 1, "subscribe": 1}))
-    
-    # Auto-Check Balance on Start
-    ws.send(json.dumps({"balance": 1, "subscribe": 1}))
+    # Subscribe balance stream so we always have data when requested
+    ws.send(json.dumps({"balance": 1, "subscribe": 1})) 
 
     bot.send_message(MY_CHAT_ID, "📡 Gathering Data...")
     data_ready_sent = False
