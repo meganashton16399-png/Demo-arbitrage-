@@ -2,3 +2,4 @@ pyTelegramBotAPI
 websocket-client
 pandas
 pandas_ta
+flask
