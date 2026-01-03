@@ -13,7 +13,7 @@ import pandas_ta as ta
 # --- 1. CONFIGURATION ---
 APP_ID = 119348
 API_TOKEN = "6D17WOjBDvq51Dz"
-TELE_TOKEN = "8472550297:AAF2JSnAvc3eSdi0zMBKVFL4ptOWVNAWNPM"
+TELE_TOKEN = "8472550297:AAGylw6wRt-k6Y-ASzDKZCE-ExnI77yJSlU"
 MY_CHAT_ID = "8559974035"
 
 bot = telebot.TeleBot(TELE_TOKEN)
@@ -27,9 +27,8 @@ multiplier = 2.1
 ticks_history = []
 ws_connected = False 
 
-# ✅ CHANGE 1: Correct 1-Second Symbol
 ASSETS = {
-    "Volatility 100 (1s) Index": "1HZ100V", # Ye hai asli Machine Gun Asset
+    "Volatility 100 (1s) Index": "1HZ100V", 
     "Bitcoin (BTCUSD)": "cryBTCUSD",
     "Gold (XAUUSD)": "frxXAUUSD"
 }
@@ -37,7 +36,7 @@ ASSETS = {
 # --- 2. UPTIME SERVER ---
 @app.route('/')
 def home():
-    return "Bot is Alive! 1HZ100V Active."
+    return "Bot is Alive! Fixed Ping Issue."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -89,10 +88,6 @@ def on_message(ws, message):
             bot.send_message(MY_CHAT_ID, f"❌ API Error: {data['error']['message']}")
             return
 
-        if 'authorize' in data:
-            # Login successful
-            pass
-
         if 'tick' in data:
             price = data['tick']['quote']
             ticks_history.append(price)
@@ -104,7 +99,6 @@ def on_message(ws, message):
                 profit = float(contract['profit'])
                 if profit > 0:
                     current_lot = 0.50
-                    # bot.send_message(MY_CHAT_ID, "✅ WIN")
                 else:
                     current_lot = round(current_lot * multiplier, 2)
                     bot.send_message(MY_CHAT_ID, f"💔 LOSS! Next: {current_lot}")
@@ -116,7 +110,7 @@ def place_order(ws, direction, amount):
     try:
         trade_msg = {
             "buy": 1,
-            "price": amount, # Safety Check
+            "price": amount,
             "parameters": {
                 "amount": amount,
                 "basis": "stake",
@@ -150,7 +144,7 @@ def start_bot(message):
     ticks_history = [] 
     current_lot = 0.50
     
-    bot.send_message(message.chat.id, f"🚀 Launching {SELECTED_SYMBOL} (High Speed)...", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, f"🚀 Launching {SELECTED_SYMBOL}...", reply_markup=types.ReplyKeyboardRemove())
     threading.Thread(target=trading_loop).start()
 
 @bot.message_handler(commands=['stop'])
@@ -159,15 +153,16 @@ def stop_bot(message):
     is_trading = False
     bot.reply_to(message, "🛑 Stopped.")
 
-# --- 6. MAIN LOOP ---
+# --- 6. MAIN LOOP (FIXED) ---
 def trading_loop():
     global is_trading, ws_connected
     
-    # ✅ CHANGE 3: Ping Interval added to keep connection alive
+    # ✅ FIX: Removed ping_interval from here
     ws = websocket.WebSocketApp(f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}", 
-                                on_open=on_open, on_message=on_message,
-                                ping_interval=30, ping_timeout=10)
-    wst = threading.Thread(target=ws.run_forever)
+                                on_open=on_open, on_message=on_message)
+    
+    # ✅ FIX: Moved ping_interval to run_forever using kwargs
+    wst = threading.Thread(target=ws.run_forever, kwargs={'ping_interval': 30, 'ping_timeout': 10})
     wst.daemon = True
     wst.start()
     
@@ -177,31 +172,26 @@ def trading_loop():
     
     # Initial status
     bot.send_message(MY_CHAT_ID, "📡 Gathering Data...")
-    
     data_ready_sent = False
 
     while is_trading:
         try:
-            # Data Collection Phase
             if len(ticks_history) < 20:
-                # ✅ CHANGE 2: Progress Update every 5 ticks
                 if len(ticks_history) > 0 and len(ticks_history) % 5 == 0:
                     bot.send_message(MY_CHAT_ID, f"⏳ Loading Data: {len(ticks_history)}/20...")
                     time.sleep(2) 
                 time.sleep(1)
                 continue
             
-            # Start Trading
             if not data_ready_sent:
                 bot.send_message(MY_CHAT_ID, "✅ Data Full! Machine Gun Mode ON 🔫")
                 data_ready_sent = True
 
-            # Execute Logic
             bias = get_bias()
             if bias:
                 place_order(ws, bias, current_lot)
             
-            time.sleep(1) # 1 Sec Interval
+            time.sleep(1) 
             
         except Exception as e:
             time.sleep(5)
