@@ -13,7 +13,7 @@ import pandas_ta as ta
 # --- 1. CONFIGURATION ---
 APP_ID = 119348
 API_TOKEN = "d6jWOdj2UJAkg1Q" # ✅ New Token
-TELE_TOKEN = "8472550297:AAGFnGBP51Yv1EH4k3USQvTqvIzA6KEm0k8" # ✅ New Bot Token
+TELE_TOKEN = "8472550297:AAGN4jLi4Z-yWaQwXt_F4Cd7Dr5thvN8cGY" # ✅ New Bot Token
 MY_CHAT_ID = "8559974035"
 
 bot = telebot.TeleBot(TELE_TOKEN)
