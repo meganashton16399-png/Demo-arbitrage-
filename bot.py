@@ -10,7 +10,7 @@ from threading import Thread
 import pandas as pd
 import pandas_ta as ta
 
-# --- 1. CREDENTIALS ---
+# --- 1. CONFIGURATION ---
 APP_ID = 119348
 API_TOKEN = "97TGFzZ36ZBulqy" # Hardcoded Deriv Token
 
@@ -18,7 +18,7 @@ API_TOKEN = "97TGFzZ36ZBulqy" # Hardcoded Deriv Token
 TELE_TOKEN = os.environ.get("BOT_TOKEN")
 MY_CHAT_ID = os.environ.get("CHAT_ID")
 
-# Fallback (Testing only)
+# Fallback (Agar Env set nahi hai)
 if not TELE_TOKEN:
     TELE_TOKEN = "8472550297:AAE05TUxFHedmwh8g0hrx4EnNjFaCo_LJ8E"
     MY_CHAT_ID = "8559974035"
@@ -30,14 +30,16 @@ app = Flask(__name__)
 is_trading = False
 SELECTED_SYMBOL = ""
 current_stake = 1.0  
-multiplier_val = 10 
+multiplier_val = 100 # ✅ Standard x100 (Best for Volatility)
 martingale_factor = 2.0 
 ticks_history = []
 ws_connected = False 
 is_position_open = False
 authorized = False 
 
+# ✅ Asset List (Volatility added for testing)
 ASSETS = {
+    "Volatility 100 (1s) Index": "1HZ100V", # ISPAR TEST KARO PEHLE
     "Bitcoin (BTCUSD)": "cryBTCUSD", 
     "Gold (XAUUSD)": "frxXAUUSD"     
 }
@@ -45,7 +47,7 @@ ASSETS = {
 # --- 2. SERVER ---
 @app.route('/')
 def home():
-    return "Bot is Live! Contract Type Fixed."
+    return "Bot is Live! Final Fix Applied."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -63,13 +65,11 @@ def get_bias():
     df = pd.DataFrame(ticks_history, columns=['close'])
     ema9 = ta.ema(df['close'], length=9).iloc[-1]
     ema21 = ta.ema(df['close'], length=21).iloc[-1]
-    rsi = ta.rsi(df['close'], length=14).iloc[-1]
     current = df['close'].iloc[-1]
     prev = df['close'].iloc[-2]
 
     buy_score = 0
     if ema9 > ema21: buy_score += 1
-    if rsi > 50: buy_score += 1
     if current > prev: buy_score += 1
 
     if buy_score >= 2: return "buy"
@@ -90,13 +90,13 @@ def on_message(ws, message):
 
         if 'error' in data:
             err_msg = data['error']['message']
-            bot.send_message(MY_CHAT_ID, f"⚠️ Error: {err_msg}")
-            is_position_open = False # Reset on error
+            bot.send_message(MY_CHAT_ID, f"⚠️ API Error: {err_msg}")
+            is_position_open = False 
             return
 
         if 'authorize' in data:
             authorized = True
-            bot.send_message(MY_CHAT_ID, "✅ Ready! Multiplier Mode.")
+            bot.send_message(MY_CHAT_ID, "✅ Ready! Logic: Multipliers (x100)")
             ws.send(json.dumps({"proposal_open_contract": 1, "subscribe": 1}))
 
         if 'tick' in data:
@@ -112,7 +112,7 @@ def on_message(ws, message):
         # ✅ Buy Confirm
         if 'buy' in data:
             buy_id = data['buy']['contract_id']
-            bot.send_message(MY_CHAT_ID, f"🔫 Trade EXECUTED! ID: {buy_id}")
+            bot.send_message(MY_CHAT_ID, f"🔫 Trade OPENED! ID: {buy_id}")
 
         # ✅ Result Monitor
         if 'proposal_open_contract' in data:
@@ -141,29 +141,22 @@ def send_proposal(ws, direction, amount):
     if not authorized: return
 
     try:
-        take_profit_amt = round(amount * 0.5, 2)
-        stop_loss_amt = round(amount * 0.8, 2)
+        # TP/SL removed temporarily to test connection
+        # Agar ye chal gaya to TP/SL wapas daal denge
         
-        # ✅ FIX: Direction sahi set karo
-        contract_type = "multup" if direction == "buy" else "multdown"
-
         proposal_msg = {
             "proposal": 1,
             "amount": amount,
             "basis": "stake",
-            "contract_type": contract_type, # ✅ 'multiplier' ki jagah 'multup'
+            "contract_type": "multiplier", # ✅ CORRECT TYPE (Reverted)
             "currency": "USD",
             "symbol": SELECTED_SYMBOL,
-            "multiplier": multiplier_val,
-            "limit_order": {
-                "take_profit": take_profit_amt,
-                "stop_loss": stop_loss_amt
-            }
+            "multiplier": multiplier_val
         }
         
         ws.send(json.dumps(proposal_msg))
         is_position_open = True 
-        bot.send_message(MY_CHAT_ID, f"⏳ Signal: {direction.upper()} | Requesting...")
+        bot.send_message(MY_CHAT_ID, f"⏳ Requesting Trade: {direction.upper()}...")
         
     except Exception as e:
         bot.send_message(MY_CHAT_ID, f"⚠️ Local Error: {e}")
@@ -173,8 +166,9 @@ def send_proposal(ws, direction, amount):
 @bot.message_handler(commands=['trade'])
 def ask_asset(message):
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
-    markup.add("Bitcoin (BTCUSD)", "Gold (XAUUSD)")
-    bot.send_message(message.chat.id, "Select Asset:", reply_markup=markup)
+    # ✅ Added Volatility 100 for testing
+    markup.add("Volatility 100 (1s) Index", "Bitcoin (BTCUSD)")
+    bot.send_message(message.chat.id, "Select Asset (Try Volatility 100 first):", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ASSETS.keys())
 def start_bot(message):
