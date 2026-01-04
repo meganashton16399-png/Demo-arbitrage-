@@ -10,19 +10,18 @@ from threading import Thread
 import pandas as pd
 import pandas_ta as ta
 
-# --- 1. CREDENTIALS SETUP ---
+# --- 1. CREDENTIALS ---
 APP_ID = 119348
+API_TOKEN = "97TGFzZ36ZBulqy" # Hardcoded Deriv Token
 
-# ✅ Deriv Token Hardcoded (Jaisa aapne kaha)
-API_TOKEN = "97TGFzZ36ZBulqy"
-
-# ✅ Telegram Credentials (Render Env se aayenge)
+# Telegram Env se lo (taaki secure rahe), ya hardcode kar lo agar error aa raha ho
 TELE_TOKEN = os.environ.get("BOT_TOKEN")
 MY_CHAT_ID = os.environ.get("CHAT_ID")
 
-# Error Check taaki deploy fail na ho agar Env missing ho
-if not TELE_TOKEN or not MY_CHAT_ID:
-    print("⚠️ WARNING: BOT_TOKEN ya CHAT_ID Environment Variables mein nahi mile!")
+# Fallback agar Env set nahi hai to (Sirf testing ke liye)
+if not TELE_TOKEN:
+    TELE_TOKEN = "8472550297:AAE05TUxFHedmwh8g0hrx4EnNjFaCo_LJ8E"
+    MY_CHAT_ID = "8559974035"
 
 bot = telebot.TeleBot(TELE_TOKEN)
 app = Flask(__name__)
@@ -31,7 +30,7 @@ app = Flask(__name__)
 is_trading = False
 SELECTED_SYMBOL = ""
 current_stake = 1.0  
-multiplier_val = 100 
+multiplier_val = 10 # ✅ SAFE START: x100 ki jagah x10 kar raha hu test ke liye
 martingale_factor = 2.0 
 ticks_history = []
 ws_connected = False 
@@ -43,10 +42,10 @@ ASSETS = {
     "Gold (XAUUSD)": "frxXAUUSD"     
 }
 
-# --- 2. UPTIME SERVER ---
+# --- 2. SERVER ---
 @app.route('/')
 def home():
-    return "Bot is Live! Hybrid Auth Mode."
+    return "Bot is Live! Debug Mode ON."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -69,25 +68,19 @@ def get_bias():
     prev = df['close'].iloc[-2]
 
     buy_score = 0
-    sell_score = 0
-    
     if ema9 > ema21: buy_score += 1
-    else: sell_score += 1
     if rsi > 50: buy_score += 1
-    else: sell_score += 1
     if current > prev: buy_score += 1
-    else: sell_score += 1
 
+    # Sirf BUY logic test kar rahe hain
     if buy_score >= 2: return "buy"
-    if sell_score >= 2: return "sell"
-    return "buy"
+    return None
 
 # --- 4. DERIV HANDLERS ---
 def on_open(ws):
     global ws_connected
     ws_connected = True
     print("🔌 Connecting...")
-    # Auth Request with Hardcoded Token
     auth_data = {"authorize": API_TOKEN}
     ws.send(json.dumps(auth_data))
 
@@ -96,42 +89,47 @@ def on_message(ws, message):
     try:
         data = json.loads(message)
 
+        # 🚨 ERROR CATCHING (Ye batayega kyu fail hua)
         if 'error' in data:
             err_msg = data['error']['message']
             err_code = data['error']['code']
-            print(f"❌ Error: {err_msg}")
+            print(f"❌ API Error: {err_msg}")
             
-            # Auth Error Retry
-            if err_code == "AuthorizationRequired":
-                ws.send(json.dumps({"authorize": API_TOKEN}))
+            # Telegram par bhejo error
+            bot.send_message(MY_CHAT_ID, f"⚠️ Trade Failed: {err_msg}\nCode: {err_code}")
             
+            is_position_open = False # Reset taaki atak na jaye
             return
 
         # Login Success
         if 'authorize' in data:
             authorized = True
-            print("✅ Authorized!")
-            bot.send_message(MY_CHAT_ID, "✅ Login Successful! Connected to Deriv.")
+            bot.send_message(MY_CHAT_ID, "✅ Login Success! Ready.")
             ws.send(json.dumps({"proposal_open_contract": 1, "subscribe": 1}))
 
+        # Ticks
         if 'tick' in data:
             price = data['tick']['quote']
             ticks_history.append(price)
             if len(ticks_history) > 100: ticks_history.pop(0)
 
-        # Execute Buy on Proposal
+        # ✅ STEP 2: Proposal Aaya -> Ab Buy Karo
         if 'proposal' in data:
             proposal_id = data['proposal']['id']
+            # bot.send_message(MY_CHAT_ID, f"📨 Proposal ID: {proposal_id} received. Buying...")
             ws.send(json.dumps({"buy": proposal_id, "price": 1000}))
-            bot.send_message(MY_CHAT_ID, f"🔫 Trade Executed!")
 
-        # Trade Result
+        # ✅ STEP 3: Buy Confirm Hua
+        if 'buy' in data:
+            buy_id = data['buy']['contract_id']
+            bot.send_message(MY_CHAT_ID, f"🔫 Trade EXECUTED! ID: {buy_id}")
+
+        # ✅ STEP 4: Trade Result
         if 'proposal_open_contract' in data:
             contract = data['proposal_open_contract']
             
             if contract['is_sold']:
                 is_position_open = False 
-                
                 profit = float(contract['profit'])
                 
                 if profit > 0:
@@ -141,9 +139,7 @@ def on_message(ws, message):
                     status = "🔴 LOSS"
                     current_stake = round(current_stake * martingale_factor, 2)
                 
-                msg = (f"{status}\n"
-                       f"📊 Profit: ${profit}\n"
-                       f"🔄 Next Stake: ${current_stake}")
+                msg = (f"{status}\nProfit: ${profit}\nNext: ${current_stake}")
                 bot.send_message(MY_CHAT_ID, msg)
 
     except Exception as e:
@@ -152,12 +148,11 @@ def on_message(ws, message):
 def send_proposal(ws, direction, amount):
     global is_position_open, authorized
     
-    if not authorized:
-        return
+    if not authorized: return
 
     try:
-        # TP/SL Logic (Multiplier Strategy)
-        take_profit_amt = round(amount * 0.6, 2)
+        # TP/SL Calculation
+        take_profit_amt = round(amount * 0.5, 2) # Profit Target kam kiya for safety
         stop_loss_amt = round(amount * 0.8, 2)
         
         proposal_msg = {
@@ -167,21 +162,19 @@ def send_proposal(ws, direction, amount):
             "contract_type": "multiplier",
             "currency": "USD",
             "symbol": SELECTED_SYMBOL,
-            "multiplier": multiplier_val,
+            "multiplier": multiplier_val, # Using x10 now
             "limit_order": {
                 "take_profit": take_profit_amt,
                 "stop_loss": stop_loss_amt
             }
         }
         
-        if direction == "sell": return 
-            
         ws.send(json.dumps(proposal_msg))
         is_position_open = True 
-        bot.send_message(MY_CHAT_ID, f"🔫 Entry Signal: {direction.upper()} | Stake: ${amount}")
+        bot.send_message(MY_CHAT_ID, f"⏳ Signal: {direction.upper()} | Requesting Server...")
         
     except Exception as e:
-        bot.send_message(MY_CHAT_ID, f"⚠️ Proposal Fail: {e}")
+        bot.send_message(MY_CHAT_ID, f"⚠️ Local Error: {e}")
         is_position_open = False
 
 # --- 5. COMMANDS ---
@@ -195,7 +188,7 @@ def ask_asset(message):
 def start_bot(message):
     global is_trading, SELECTED_SYMBOL, current_stake, ticks_history, is_position_open, authorized
     if is_trading:
-        bot.send_message(message.chat.id, "Bot already running!")
+        bot.send_message(message.chat.id, "Already Running.")
         return
 
     SELECTED_SYMBOL = ASSETS[message.text]
@@ -205,7 +198,7 @@ def start_bot(message):
     is_position_open = False
     authorized = False 
     
-    bot.send_message(message.chat.id, f"🚀 Bot Started: {SELECTED_SYMBOL}\nConnecting...", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, f"🚀 Debug Bot Started: {SELECTED_SYMBOL}", reply_markup=types.ReplyKeyboardRemove())
     threading.Thread(target=trading_loop).start()
 
 @bot.message_handler(commands=['stop'])
@@ -226,7 +219,6 @@ def trading_loop():
     wst.start()
     
     time.sleep(3)
-    # Auth ab on_open me automatic hoga
     ws.send(json.dumps({"ticks": SELECTED_SYMBOL, "subscribe": 1}))
 
     while is_trading:
@@ -238,7 +230,8 @@ def trading_loop():
             bias = get_bias()
             if bias == "buy" and authorized: 
                 send_proposal(ws, bias, current_stake)
-                time.sleep(10) 
+                # Response aane ka wait karo before next logic
+                time.sleep(15) 
             
             time.sleep(1) 
             
