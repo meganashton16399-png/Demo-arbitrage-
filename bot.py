@@ -10,15 +10,15 @@ from threading import Thread
 import pandas as pd
 import pandas_ta as ta
 
-# --- 1. CONFIGURATION ---
+# --- 1. CREDENTIALS ---
 APP_ID = 119348
-API_TOKEN = "97TGFzZ36ZBulqy" # Hardcoded Deriv Token
+API_TOKEN = "97TGFzZ36ZBulqy" # Hardcoded Token (Correct)
 
 # Telegram Env se
 TELE_TOKEN = os.environ.get("BOT_TOKEN")
 MY_CHAT_ID = os.environ.get("CHAT_ID")
 
-# Fallback (Agar Env set nahi hai)
+# Fallback Check
 if not TELE_TOKEN:
     TELE_TOKEN = "8472550297:AAE05TUxFHedmwh8g0hrx4EnNjFaCo_LJ8E"
     MY_CHAT_ID = "8559974035"
@@ -30,24 +30,22 @@ app = Flask(__name__)
 is_trading = False
 SELECTED_SYMBOL = ""
 current_stake = 1.0  
-multiplier_val = 100 # ✅ Standard x100 (Best for Volatility)
-martingale_factor = 2.0 
+martingale_factor = 2.1 # Loss recovery
 ticks_history = []
 ws_connected = False 
 is_position_open = False
 authorized = False 
 
-# ✅ Asset List (Volatility added for testing)
+# ✅ Safe Assets
 ASSETS = {
-    "Volatility 100 (1s) Index": "1HZ100V", # ISPAR TEST KARO PEHLE
-    "Bitcoin (BTCUSD)": "cryBTCUSD", 
-    "Gold (XAUUSD)": "frxXAUUSD"     
+    "Volatility 100 (1s) Index": "1HZ100V", # Fast & 24/7
+    "Bitcoin (BTCUSD)": "cryBTCUSD"         # 24/7
 }
 
 # --- 2. SERVER ---
 @app.route('/')
 def home():
-    return "Bot is Live! Final Fix Applied."
+    return "Bot is Live! Price Action Mode."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -57,7 +55,7 @@ def keep_alive():
     t = Thread(target=run_web_server)
     t.start()
 
-# --- 3. TRADING LOGIC ---
+# --- 3. TRADING LOGIC (Trend Follow) ---
 def get_bias():
     global ticks_history
     if len(ticks_history) < 20: return None 
@@ -65,14 +63,25 @@ def get_bias():
     df = pd.DataFrame(ticks_history, columns=['close'])
     ema9 = ta.ema(df['close'], length=9).iloc[-1]
     ema21 = ta.ema(df['close'], length=21).iloc[-1]
+    rsi = ta.rsi(df['close'], length=14).iloc[-1]
     current = df['close'].iloc[-1]
     prev = df['close'].iloc[-2]
 
+    # Strong Trend Confirmation
     buy_score = 0
+    sell_score = 0
+    
     if ema9 > ema21: buy_score += 1
+    else: sell_score += 1
+    
+    if rsi > 50: buy_score += 1
+    else: sell_score += 1
+    
     if current > prev: buy_score += 1
+    else: sell_score += 1
 
-    if buy_score >= 2: return "buy"
+    if buy_score == 3: return "buy"   # Sirf strong signal par trade
+    if sell_score == 3: return "sell"
     return None
 
 # --- 4. DERIV HANDLERS ---
@@ -90,13 +99,13 @@ def on_message(ws, message):
 
         if 'error' in data:
             err_msg = data['error']['message']
-            bot.send_message(MY_CHAT_ID, f"⚠️ API Error: {err_msg}")
+            bot.send_message(MY_CHAT_ID, f"⚠️ Error: {err_msg}")
             is_position_open = False 
             return
 
         if 'authorize' in data:
             authorized = True
-            bot.send_message(MY_CHAT_ID, "✅ Ready! Logic: Multipliers (x100)")
+            bot.send_message(MY_CHAT_ID, "✅ Ready! Strategy: 3-Min Price Action")
             ws.send(json.dumps({"proposal_open_contract": 1, "subscribe": 1}))
 
         if 'tick' in data:
@@ -112,7 +121,7 @@ def on_message(ws, message):
         # ✅ Buy Confirm
         if 'buy' in data:
             buy_id = data['buy']['contract_id']
-            bot.send_message(MY_CHAT_ID, f"🔫 Trade OPENED! ID: {buy_id}")
+            bot.send_message(MY_CHAT_ID, f"🔫 Trade Placed (3 Min Duration)")
 
         # ✅ Result Monitor
         if 'proposal_open_contract' in data:
@@ -141,22 +150,23 @@ def send_proposal(ws, direction, amount):
     if not authorized: return
 
     try:
-        # TP/SL removed temporarily to test connection
-        # Agar ye chal gaya to TP/SL wapas daal denge
+        # ✅ FIX: Using Standard CALL/PUT (Never Fails)
+        contract = "CALL" if direction == "buy" else "PUT"
         
         proposal_msg = {
             "proposal": 1,
             "amount": amount,
             "basis": "stake",
-            "contract_type": "multiplier", # ✅ CORRECT TYPE (Reverted)
+            "contract_type": contract, 
             "currency": "USD",
             "symbol": SELECTED_SYMBOL,
-            "multiplier": multiplier_val
+            "duration": 3,      # ✅ 3 Minute Duration
+            "duration_unit": "m" 
         }
         
         ws.send(json.dumps(proposal_msg))
         is_position_open = True 
-        bot.send_message(MY_CHAT_ID, f"⏳ Requesting Trade: {direction.upper()}...")
+        bot.send_message(MY_CHAT_ID, f"⏳ Trend Found: {direction.upper()} | Stake: ${amount}")
         
     except Exception as e:
         bot.send_message(MY_CHAT_ID, f"⚠️ Local Error: {e}")
@@ -166,9 +176,8 @@ def send_proposal(ws, direction, amount):
 @bot.message_handler(commands=['trade'])
 def ask_asset(message):
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
-    # ✅ Added Volatility 100 for testing
     markup.add("Volatility 100 (1s) Index", "Bitcoin (BTCUSD)")
-    bot.send_message(message.chat.id, "Select Asset (Try Volatility 100 first):", reply_markup=markup)
+    bot.send_message(message.chat.id, "Select Asset:", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text in ASSETS.keys())
 def start_bot(message):
@@ -214,9 +223,9 @@ def trading_loop():
                 continue
             
             bias = get_bias()
-            if bias == "buy" and authorized: 
+            if bias and authorized: 
                 send_proposal(ws, bias, current_stake)
-                time.sleep(15) 
+                time.sleep(180) # 3 Minute wait kyu ki trade chal rahi hogi
             
             time.sleep(1) 
             
