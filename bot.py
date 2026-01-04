@@ -14,11 +14,11 @@ import pandas_ta as ta
 APP_ID = 119348
 API_TOKEN = "97TGFzZ36ZBulqy" # Hardcoded Deriv Token
 
-# Telegram Env se lo (taaki secure rahe), ya hardcode kar lo agar error aa raha ho
+# Telegram Env se
 TELE_TOKEN = os.environ.get("BOT_TOKEN")
 MY_CHAT_ID = os.environ.get("CHAT_ID")
 
-# Fallback agar Env set nahi hai to (Sirf testing ke liye)
+# Fallback (Testing only)
 if not TELE_TOKEN:
     TELE_TOKEN = "8472550297:AAE05TUxFHedmwh8g0hrx4EnNjFaCo_LJ8E"
     MY_CHAT_ID = "8559974035"
@@ -30,7 +30,7 @@ app = Flask(__name__)
 is_trading = False
 SELECTED_SYMBOL = ""
 current_stake = 1.0  
-multiplier_val = 10 # ✅ SAFE START: x100 ki jagah x10 kar raha hu test ke liye
+multiplier_val = 10 
 martingale_factor = 2.0 
 ticks_history = []
 ws_connected = False 
@@ -45,7 +45,7 @@ ASSETS = {
 # --- 2. SERVER ---
 @app.route('/')
 def home():
-    return "Bot is Live! Debug Mode ON."
+    return "Bot is Live! Contract Type Fixed."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -72,7 +72,6 @@ def get_bias():
     if rsi > 50: buy_score += 1
     if current > prev: buy_score += 1
 
-    # Sirf BUY logic test kar rahe hain
     if buy_score >= 2: return "buy"
     return None
 
@@ -89,42 +88,33 @@ def on_message(ws, message):
     try:
         data = json.loads(message)
 
-        # 🚨 ERROR CATCHING (Ye batayega kyu fail hua)
         if 'error' in data:
             err_msg = data['error']['message']
-            err_code = data['error']['code']
-            print(f"❌ API Error: {err_msg}")
-            
-            # Telegram par bhejo error
-            bot.send_message(MY_CHAT_ID, f"⚠️ Trade Failed: {err_msg}\nCode: {err_code}")
-            
-            is_position_open = False # Reset taaki atak na jaye
+            bot.send_message(MY_CHAT_ID, f"⚠️ Error: {err_msg}")
+            is_position_open = False # Reset on error
             return
 
-        # Login Success
         if 'authorize' in data:
             authorized = True
-            bot.send_message(MY_CHAT_ID, "✅ Login Success! Ready.")
+            bot.send_message(MY_CHAT_ID, "✅ Ready! Multiplier Mode.")
             ws.send(json.dumps({"proposal_open_contract": 1, "subscribe": 1}))
 
-        # Ticks
         if 'tick' in data:
             price = data['tick']['quote']
             ticks_history.append(price)
             if len(ticks_history) > 100: ticks_history.pop(0)
 
-        # ✅ STEP 2: Proposal Aaya -> Ab Buy Karo
+        # ✅ Proposal Aaya -> Buy Karo
         if 'proposal' in data:
             proposal_id = data['proposal']['id']
-            # bot.send_message(MY_CHAT_ID, f"📨 Proposal ID: {proposal_id} received. Buying...")
             ws.send(json.dumps({"buy": proposal_id, "price": 1000}))
 
-        # ✅ STEP 3: Buy Confirm Hua
+        # ✅ Buy Confirm
         if 'buy' in data:
             buy_id = data['buy']['contract_id']
             bot.send_message(MY_CHAT_ID, f"🔫 Trade EXECUTED! ID: {buy_id}")
 
-        # ✅ STEP 4: Trade Result
+        # ✅ Result Monitor
         if 'proposal_open_contract' in data:
             contract = data['proposal_open_contract']
             
@@ -151,18 +141,20 @@ def send_proposal(ws, direction, amount):
     if not authorized: return
 
     try:
-        # TP/SL Calculation
-        take_profit_amt = round(amount * 0.5, 2) # Profit Target kam kiya for safety
+        take_profit_amt = round(amount * 0.5, 2)
         stop_loss_amt = round(amount * 0.8, 2)
         
+        # ✅ FIX: Direction sahi set karo
+        contract_type = "multup" if direction == "buy" else "multdown"
+
         proposal_msg = {
             "proposal": 1,
             "amount": amount,
             "basis": "stake",
-            "contract_type": "multiplier",
+            "contract_type": contract_type, # ✅ 'multiplier' ki jagah 'multup'
             "currency": "USD",
             "symbol": SELECTED_SYMBOL,
-            "multiplier": multiplier_val, # Using x10 now
+            "multiplier": multiplier_val,
             "limit_order": {
                 "take_profit": take_profit_amt,
                 "stop_loss": stop_loss_amt
@@ -171,7 +163,7 @@ def send_proposal(ws, direction, amount):
         
         ws.send(json.dumps(proposal_msg))
         is_position_open = True 
-        bot.send_message(MY_CHAT_ID, f"⏳ Signal: {direction.upper()} | Requesting Server...")
+        bot.send_message(MY_CHAT_ID, f"⏳ Signal: {direction.upper()} | Requesting...")
         
     except Exception as e:
         bot.send_message(MY_CHAT_ID, f"⚠️ Local Error: {e}")
@@ -198,7 +190,7 @@ def start_bot(message):
     is_position_open = False
     authorized = False 
     
-    bot.send_message(message.chat.id, f"🚀 Debug Bot Started: {SELECTED_SYMBOL}", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(message.chat.id, f"🚀 Bot Started: {SELECTED_SYMBOL}", reply_markup=types.ReplyKeyboardRemove())
     threading.Thread(target=trading_loop).start()
 
 @bot.message_handler(commands=['stop'])
@@ -230,7 +222,6 @@ def trading_loop():
             bias = get_bias()
             if bias == "buy" and authorized: 
                 send_proposal(ws, bias, current_stake)
-                # Response aane ka wait karo before next logic
                 time.sleep(15) 
             
             time.sleep(1) 
