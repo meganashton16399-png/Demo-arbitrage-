@@ -1,70 +1,68 @@
 import telebot
 from telebot import types
-from tradingview_ta import TA_Handler, Interval, Exchange
+import ccxt
+import pandas as pd
+import pandas_ta as ta
 import time
 import os
 from flask import Flask
 import threading
 
-# --- 1. SETUP ---
+# --- 1. SECURE CONFIGURATION (ENV VARS) ---
+API_KEY = os.environ.get("BYBIT_API")
+API_SECRET = os.environ.get("BYBIT_SC")
 TELE_TOKEN = os.environ.get("BOT_TOKEN")
 MY_CHAT_ID = os.environ.get("CHAT_ID")
 
-if not TELE_TOKEN:
-    TELE_TOKEN = "YOUR_TOKEN"
-    MY_CHAT_ID = "YOUR_ID"
+# Error Handling for missing keys
+if not API_KEY or not API_SECRET:
+    print("⚠️ Warning: Bybit API Keys are missing in Environment Variables!")
 
 bot = telebot.TeleBot(TELE_TOKEN)
 app = Flask(__name__)
 
-# --- CONFIGURATION (FAST SCALPING) ---
-# 0.0004 = 0.04% = Approx 10 Pips on Gold
-TP_PERCENT = 0.0004 
-SL_PERCENT = 0.0004 
-MARTINGALE_FACTOR = 2.5 # Loss cover + Profit
-
-# Global State
+# --- GLOBAL SETTINGS ---
 is_trading = False
-SELECTED_ASSET = ""
-HANDLER_CONFIG = {} 
-TIMEFRAME = Interval.INTERVAL_1_MINUTE 
+SELECTED_SYMBOL = "" 
+INITIAL_STAKE = 10.0  # USDT
+CURRENT_STAKE = 10.0
+LEVERAGE = 10         # 10x Leverage
 
-# Money Management
-INITIAL_STAKE = 100.0 # Default Start
-CURRENT_STAKE = 100.0 
+# Scalping Rules (Price Change %)
+# 0.001 = 0.1% Price Move (Approx $2-$3 move in Gold) -> Fast Scalp
+TP_PERCENT = 0.001 
+SL_PERCENT = 0.002
+MARTINGALE_FACTOR = 2.5
 
-wallet = {
-    "balance": 10000.0,
-    "positions": [],
-    "history": []
-}
+# Bybit Setup (CCXT)
+exchange = ccxt.bybit({
+    'apiKey': API_KEY,
+    'secret': API_SECRET,
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'future',  # Futures Trading
+        'adjustForTimeDifference': True
+    }
+})
+exchange.set_sandbox_mode(True) # ✅ TESTNET MODE ACTIVE
 
+# Stats
 stats = {
-    "start_balance": 10000.0,
     "wins": 0,
     "losses": 0,
-    "max_stake": 0.0,
-    "current_loss_streak": 0
+    "current_streak": 0
 }
 
-# Assets
+# Assets Map
 ASSETS = {
-    "Bitcoin (BTC)": {
-        "symbol": "BTCUSDT",
-        "screener": "crypto",
-        "exchange": "BINANCE"
-    },
-    "Gold (XAU)": {
-        "symbol": "GOLD",
-        "screener": "cfd",
-        "exchange": "TVC" 
-    }
+    "Bitcoin (BTC)": "BTC/USDT:USDT",
+    "Gold (XAU)": "XAU/USDT:USDT"
 }
 
-# --- 2. SERVER ---
+# --- 2. SERVER (Keep Alive) ---
 @app.route('/')
 def home():
-    return "Scalper Bot Active!"
+    return "Bybit Scalper Bot is Running 24/7!"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
@@ -74,199 +72,164 @@ def keep_alive():
     t = threading.Thread(target=run_web_server)
     t.start()
 
-# --- 3. LOGIC ---
-def get_tv_analysis():
+# --- 3. TRADING LOGIC ---
+def get_market_data(symbol):
     try:
-        handler = TA_Handler(
-            symbol=HANDLER_CONFIG["symbol"],
-            screener=HANDLER_CONFIG["screener"],
-            exchange=HANDLER_CONFIG["exchange"],
-            interval=TIMEFRAME
-        )
-        return handler.get_analysis()
-    except:
+        # Fetch last 50 candles (1 Minute)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1m', limit=50)
+        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # Calculate Indicators
+        df['ema9'] = ta.ema(df['close'], length=9)
+        df['ema21'] = ta.ema(df['close'], length=21)
+        df['rsi'] = ta.rsi(df['close'], length=14)
+        
+        return df.iloc[-1]
+    except Exception as e:
+        print(f"Data Error: {e}")
         return None
 
-def check_exit_conditions(current_price):
-    global wallet, stats, CURRENT_STAKE
+def check_and_execute_trade():
+    global CURRENT_STAKE, stats
     
-    for pos in wallet["positions"][:]:
-        entry = pos['entry']
-        qty = pos['qty']
-        side = pos['type']
-        margin = pos['margin']
+    # 1. Check Open Positions
+    try:
+        positions = exchange.fetch_positions([SELECTED_SYMBOL])
+        active_pos = [p for p in positions if float(p['contracts']) > 0]
         
-        # Calculate PnL
-        if side == "BUY":
-            pnl_amt = (current_price - entry) * qty
-            pnl_pct = (current_price - entry) / entry
-        else:
-            pnl_amt = (entry - current_price) * qty
-            pnl_pct = (entry - current_price) / entry
+        # Agar trade chal rahi hai, toh kuch mat karo (Wait for TP/SL)
+        if len(active_pos) > 0:
+            return
             
-        # HIT TP or SL?
-        if pnl_pct >= TP_PERCENT or pnl_pct <= -SL_PERCENT:
-            wallet["balance"] += (margin + pnl_amt)
-            wallet["positions"].remove(pos)
-            
-            if pnl_amt > 0:
-                status = "🟢 WIN (TP Hit)"
-                stats["wins"] += 1
-                stats["current_loss_streak"] = 0
-                # Win hua, wapas Normal Stake par aao
-                CURRENT_STAKE = INITIAL_STAKE 
-            else:
-                status = "🔴 LOSS (SL Hit)"
-                stats["losses"] += 1
-                stats["current_loss_streak"] += 1
-                # Loss hua, Martingale lagao (2.5x)
-                CURRENT_STAKE = margin * MARTINGALE_FACTOR
-            
-            # Message Update
-            bot.send_message(MY_CHAT_ID, 
-                f"{status} | {SELECTED_ASSET}\n"
-                f"💵 P/L: ${round(pnl_amt, 2)}\n"
-                f"🏦 Bal: ${round(wallet['balance'], 2)}\n"
-                f"🔄 Next Stake: ${round(CURRENT_STAKE, 2)}")
+        # Agar trade nahi hai, check karo last trade ka result (Martingale Logic)
+        # Note: CCXT me PnL history fetch karna complex hai, 
+        # isliye hum simple logic rakhenge: 
+        # "Agar position close ho gayi, matlab TP/SL hit hua"
+        # Real PnL track karne ke liye hum balance check kar sakte hain, 
+        # par abhi ke liye simple signal follow karte hain.
+        
+    except Exception as e:
+        print(f"Position Check Error: {e}")
+        return
 
-def trading_loop():
-    global is_trading
-    print(f"🔥 Scalping Started on {SELECTED_ASSET}")
+    # 2. Get Analysis
+    data = get_market_data(SELECTED_SYMBOL)
+    if data is None: return
+
+    ema9 = data['ema9']
+    ema21 = data['ema21']
+    rsi = data['rsi']
+    current_price = data['close']
     
-    while is_trading:
+    signal = None
+    if ema9 > ema21 and rsi > 55: signal = "buy"
+    elif ema9 < ema21 and rsi < 45: signal = "sell"
+    
+    if signal:
+        # 3. Calculate TP / SL Prices
+        if signal == "buy":
+            tp_price = current_price * (1 + TP_PERCENT)
+            sl_price = current_price * (1 - SL_PERCENT)
+        else:
+            tp_price = current_price * (1 - TP_PERCENT)
+            sl_price = current_price * (1 + SL_PERCENT)
+            
+        # 4. Place Order with OTCO (One-Cancels-Other) Params
         try:
-            analysis = get_tv_analysis()
-            if not analysis:
-                time.sleep(1)
-                continue
-                
-            current_price = analysis.indicators["close"]
-            rsi = analysis.indicators["RSI"]
-            recommendation = analysis.summary["RECOMMENDATION"] 
+            # Amount Calculation (USDT to Coins)
+            amount = CURRENT_STAKE / current_price 
             
-            # Check Exits (Fast Speed)
-            if len(wallet["positions"]) > 0:
-                check_exit_conditions(current_price)
-                
-            # Entry (Only if empty)
-            if len(wallet["positions"]) == 0:
-                signal = None
-                
-                # Scalping Logic: Needs Strong Signal OR Extreme RSI
-                # Buy: TV says BUY + RSI < 70 (Room to grow)
-                if "BUY" in recommendation and rsi < 70:
-                    signal = "BUY"
-                # Sell: TV says SELL + RSI > 30 (Room to fall)
-                elif "SELL" in recommendation and rsi > 30:
-                    signal = "SELL"
-                
-                if signal:
-                    # Check Balance Safety
-                    if CURRENT_STAKE > wallet["balance"]:
-                        bot.send_message(MY_CHAT_ID, "⚠️ Balance Low for Martingale! Resetting Stake.")
-                        CURRENT_STAKE = INITIAL_STAKE
-
-                    qty = CURRENT_STAKE / current_price
-                    wallet["balance"] -= CURRENT_STAKE
-                    
-                    wallet["positions"].append({
-                        "entry": current_price,
-                        "qty": qty,
-                        "type": signal,
-                        "margin": CURRENT_STAKE
-                    })
-                    
-                    # Max Stake Record
-                    if CURRENT_STAKE > stats["max_stake"]:
-                        stats["max_stake"] = CURRENT_STAKE
-
-                    bot.send_message(MY_CHAT_ID,
-                        f"🔫 FAST {signal} EXECUTION\n"
-                        f"💰 Stake: ${round(CURRENT_STAKE, 2)}\n"
-                        f"⚡ Price: {current_price}\n"
-                        f"🎯 Target: +10 Pips")
-                    
-                    # Scalping me cooldown kam rakho (30s)
-                    time.sleep(30) 
+            # Bybit specific params for TP/SL
+            params = {
+                'takeProfit': tp_price,
+                'stopLoss': sl_price,
+            }
             
-            time.sleep(2) # 2 Sec Check (Fast)
+            order = exchange.create_order(
+                symbol=SELECTED_SYMBOL,
+                type='market',
+                side=signal,
+                amount=amount,
+                params=params
+            )
+            
+            bot.send_message(MY_CHAT_ID, 
+                f"🔫 **ORDER EXECUTED**\n"
+                f"Asset: {SELECTED_SYMBOL}\n"
+                f"Side: {signal.upper()}\n"
+                f"Stake: ${CURRENT_STAKE}\n"
+                f"Price: {current_price}\n"
+                f"🎯 TP: {round(tp_price, 2)} | 🛑 SL: {round(sl_price, 2)}"
+            )
+            
+            # Cooldown to avoid double entry
+            time.sleep(60) 
             
         except Exception as e:
+            bot.send_message(MY_CHAT_ID, f"⚠️ Order Failed: {e}")
+            time.sleep(10)
+
+def trade_loop():
+    global is_trading
+    bot.send_message(MY_CHAT_ID, f"🚀 Bot Started on Bybit Testnet!\nAsset: {SELECTED_SYMBOL}")
+    
+    # Set Leverage (One time)
+    try:
+        exchange.set_leverage(LEVERAGE, SELECTED_SYMBOL)
+    except: pass
+
+    while is_trading:
+        try:
+            check_and_execute_trade()
+            time.sleep(10) # 10 Seconds poll
+        except Exception as e:
             print(f"Loop Error: {e}")
-            time.sleep(5)
+            time.sleep(10)
 
 # --- 4. COMMANDS ---
 
 @bot.message_handler(commands=['trade'])
-def trade_step_1(message):
+def start_trade(message):
     markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
     markup.add("Bitcoin (BTC)", "Gold (XAU)")
-    msg = bot.send_message(message.chat.id, "📉 Select Asset for 10-Pip Scalping:", reply_markup=markup)
-    bot.register_next_step_handler(msg, trade_step_2)
+    msg = bot.send_message(message.chat.id, "Select Asset:", reply_markup=markup)
+    bot.register_next_step_handler(msg, set_asset)
 
-def trade_step_2(message):
-    global SELECTED_ASSET, HANDLER_CONFIG
+def set_asset(message):
+    global SELECTED_SYMBOL
     if message.text not in ASSETS:
-        bot.send_message(message.chat.id, "❌ Invalid.")
+        bot.send_message(message.chat.id, "Invalid Asset.")
         return
-    
-    SELECTED_ASSET = message.text
-    HANDLER_CONFIG = ASSETS[message.text]
-    
-    msg = bot.send_message(message.chat.id, 
-        f"Selected: {SELECTED_ASSET}\n"
-        f"💰 Enter Base Stake Amount (First trade size):",
-        reply_markup=types.ReplyKeyboardRemove())
-    bot.register_next_step_handler(msg, trade_step_3)
+    SELECTED_SYMBOL = ASSETS[message.text]
+    msg = bot.send_message(message.chat.id, "Enter Initial Stake (USDT):")
+    bot.register_next_step_handler(msg, set_stake)
 
-def trade_step_3(message):
-    global is_trading, INITIAL_STAKE, CURRENT_STAKE
+def set_stake(message):
+    global INITIAL_STAKE, CURRENT_STAKE, is_trading
     try:
-        amount = float(message.text)
+        INITIAL_STAKE = float(message.text)
+        CURRENT_STAKE = INITIAL_STAKE
+        is_trading = True
+        threading.Thread(target=trade_loop).start()
     except:
-        bot.send_message(message.chat.id, "⚠️ Invalid Number.")
-        return
-
-    INITIAL_STAKE = amount
-    CURRENT_STAKE = amount
-    is_trading = True
-    
-    bot.send_message(message.chat.id, 
-        f"✅ **SCALPER STARTED**\n"
-        f"🎯 Target: ~10 Pips (0.04%)\n"
-        f"🛡️ Martingale: 2.5x (Aggressive Recovery)\n"
-        f"💸 Base Stake: ${INITIAL_STAKE}")
-    
-    threading.Thread(target=trading_loop).start()
+        bot.send_message(message.chat.id, "Invalid number.")
 
 @bot.message_handler(commands=['stop'])
 def stop_bot(message):
     global is_trading
     is_trading = False
-    bot.send_message(message.chat.id, "🛑 Stopped.")
+    bot.send_message(message.chat.id, "🛑 Trading Stopped.")
 
-@bot.message_handler(commands=['status'])
-def status_report(message):
-    total = stats["wins"] + stats["losses"]
-    wr = (stats["wins"]/total*100) if total > 0 else 0
-    
-    report = (
-        f"📊 **SCALPING STATS**\n"
-        f"🏦 Bal: ${round(wallet['balance'], 2)}\n"
-        f"✅ Win Rate: {round(wr, 1)}%\n"
-        f"🔥 Max Loss Streak: {stats['current_loss_streak']}\n"
-        f"💎 Highest Martingale: ${round(stats['max_stake'], 2)}"
-    )
-    bot.send_message(message.chat.id, report, parse_mode="Markdown")
-
-@bot.message_handler(commands=['reset'])
-def reset_wallet(message):
-    wallet["balance"] = 10000.0
-    wallet["positions"] = []
-    stats["wins"] = 0
-    stats["losses"] = 0
-    bot.send_message(message.chat.id, "🔄 Balance Reset to $10,000.")
+@bot.message_handler(commands=['bal'])
+def check_balance(message):
+    try:
+        bal = exchange.fetch_balance()
+        usdt = bal['USDT']['free']
+        bot.send_message(message.chat.id, f"🏦 Wallet Balance: ${round(usdt, 2)}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Error: {e}")
 
 if __name__ == "__main__":
     keep_alive()
     bot.polling(non_stop=True)
+
