@@ -2,5 +2,4 @@ pyTelegramBotAPI
 flask
 pandas
 pandas_ta
-yfinance
-websocket-client
+ccxt
