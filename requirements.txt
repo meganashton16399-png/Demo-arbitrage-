@@ -1,3 +1,5 @@
 pyTelegramBotAPI
 flask
-tradingview-ta
+ccxt
+pandas
+pandas_ta
