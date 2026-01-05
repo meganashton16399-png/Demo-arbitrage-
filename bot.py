@@ -6,15 +6,15 @@ import pandas_ta as ta
 import time
 import os
 from flask import Flask
-from threading import Thread
+import threading  # ✅ FIXED: Sahi Import
 import random
 
 # --- 1. SETUP ---
-# Telegram Keys (Render Env se lega)
+# Telegram Keys
 TELE_TOKEN = os.environ.get("BOT_TOKEN")
 MY_CHAT_ID = os.environ.get("CHAT_ID")
 
-# Fallback for Testing
+# Fallback (Agar Env fail ho to)
 if not TELE_TOKEN:
     TELE_TOKEN = "YOUR_BOT_TOKEN_HERE" 
     MY_CHAT_ID = "YOUR_CHAT_ID_HERE"
@@ -26,21 +26,21 @@ app = Flask(__name__)
 is_trading = False
 SELECTED_ASSET = ""
 SELECTED_TICKER = ""
-TIMEFRAME = "1m" # 1 Minute Candles for Fast Testing
-TP_PERCENT = 0.002 # 0.2% Profit Target (Scalping)
+TIMEFRAME = "1m" # 1 Minute Candles
+TP_PERCENT = 0.002 # 0.2% Profit
 SL_PERCENT = 0.003 # 0.3% Stop Loss
 
 # Virtual Wallet
 wallet = {
-    "balance": 10000.0, # $10k Demo Money
-    "positions": [],    # Open Trades
-    "history": []       # Past Trades
+    "balance": 10000.0, 
+    "positions": [],    
+    "history": []       
 }
 
-# Assets Map (Yahoo Finance Tickers)
+# Assets Map
 ASSETS = {
     "Bitcoin (BTC)": "BTC-USD",
-    "Gold (XAU)": "GC=F" # Gold Futures
+    "Gold (XAU)": "GC=F" 
 }
 
 # --- 2. SERVER ---
@@ -53,16 +53,20 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
-    t = Thread(target=run_web_server)
+    t = threading.Thread(target=run_web_server) # ✅ Fixed usage
     t.start()
 
 # --- 3. MARKET DATA & STRATEGY ---
 def get_live_data(ticker):
     try:
-        # Fetch last 1 hour data (1m interval)
+        # Fetch last 1 day data (1m interval)
         df = yf.download(ticker, period="1d", interval=TIMEFRAME, progress=False)
         if len(df) < 20: return None
         
+        # Flatten columns if MultiIndex (yfinance update fix)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
         # Calculate Indicators
         df['ema9'] = ta.ema(df['Close'], length=9)
         df['ema21'] = ta.ema(df['Close'], length=21)
@@ -154,9 +158,9 @@ def trading_loop():
                         f"Price: ${round(current_price, 2)}\n"
                         f"Target: +{TP_PERCENT*100}% | Stop: -{SL_PERCENT*100}%")
                     
-                    time.sleep(60) # Wait 1 min before next check to avoid spam
+                    time.sleep(60) # Wait 1 min to avoid spam
             
-            time.sleep(5) # Check every 5 seconds
+            time.sleep(5) 
             
         except Exception as e:
             print(f"Loop Error: {e}")
@@ -187,7 +191,7 @@ def set_asset(message):
         f"📡 Data Source: Yahoo Finance Live")
     
     # Start Loop
-    threading.Thread(target=trading_loop).start()
+    threading.Thread(target=trading_loop).start() # ✅ FIXED: Sahi usage
 
 @bot.message_handler(commands=['stats'])
 def get_stats(message):
