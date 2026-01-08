@@ -1,5 +1,4 @@
 pyTelegramBotAPI
-flask
 ccxt
-pandas
-pandas_ta
+groq
+flask
