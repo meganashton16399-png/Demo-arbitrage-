@@ -8,7 +8,7 @@ from groq import Groq
 from flask import Flask
 import pandas as pd
 
-# --- 1. SETUP ---
+# --- 1. CONFIG ---
 TELE_TOKEN = os.environ.get("BOT_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 
@@ -22,101 +22,90 @@ users = {}
 def get_user(chat_id):
     if chat_id not in users:
         users[chat_id] = {
-            "balance": 10000.0, "pnl": 0.0, "wins": 0, "losses": 0,
+            "balance": 10000.0, "total_lost": 0.0, "wins": 0, "losses": 0,
             "initial_stake": 50.0, "current_stake": 50.0,
             "active_trade": None, "is_trading": False, "symbol": "BTC/USD"
         }
     return users[chat_id]
 
-# --- 2. THE MECHANICAL ENGINE ---
-
-def get_indicators(symbol):
+# --- 2. MECHANICAL DATA ---
+def get_market_data(symbol):
     try:
-        # Fetch 5m for Bias, 1m for Entry
         tf5 = market.fetch_ohlcv(symbol, timeframe='5m', limit=60)
         tf1 = market.fetch_ohlcv(symbol, timeframe='1m', limit=30)
         ticker = market.fetch_ticker(symbol)
-        
         df5 = pd.DataFrame(tf5, columns=['t','o','h','l','c','v'])
         df1 = pd.DataFrame(tf1, columns=['t','o','h','l','c','v'])
         
-        # 5m Bias (EMA 20 vs 50)
-        ema20_5m = df5['c'].ewm(span=20).mean().iloc[-1]
-        ema50_5m = df5['c'].ewm(span=50).mean().iloc[-1]
-        bias = "BUY" if ema20_5m > ema50_5m else "SELL"
+        # Bias (5m EMA)
+        e20 = df5['c'].ewm(span=20).mean().iloc[-1]
+        e50 = df5['c'].ewm(span=50).mean().iloc[-1]
+        bias = "BUY" if e20 > e50 else "SELL"
         
-        # 1m Entry Data
-        ema9_1m = df1['c'].ewm(span=9).mean().iloc[-1]
-        ema21_1m = df1['c'].ewm(span=21).mean().iloc[-1]
-        
-        # RSI 14
+        # Entry (1m RSI)
         delta = df1['c'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs.iloc[-1]))
+        rsi = 100 - (100 / (1 + (gain / loss).iloc[-1]))
         
-        # Spread Calculation
         spread = ticker['ask'] - ticker['bid']
-        spread_pips = (spread / ticker['last']) * 10000 # Rough pip conversion
-        
-        curr_price = ticker['last']
-        pos = "above" if curr_price > ema9_1m else "below" if curr_price < ema21_1m else "inside"
-        
-        return bias, ema20_5m, ema50_5m, pos, rsi, spread_pips, curr_price, df1.iloc[-2]
+        return bias, rsi, spread, ticker['last'], df1.iloc[-2]
     except: return None
 
-# --- 3. THE GROQ BIAS ENGINE ---
-
-def get_ai_sniper_v8(symbol, chat_id):
-    data = get_indicators(symbol)
+# --- 3. AI PROBABILITY (STRICT) ---
+def get_ai_v10(symbol, chat_id):
+    data = get_market_data(symbol)
     if not data: return None
-    bias, e20, e50, pos, rsi, spread, price, last_c = data
+    bias, rsi, spread, price, last_c = data
     
-    # 1-Line Spread Guard
-    if spread > 1.0: return "WAIT", price, f"Spread High ({round(spread,2)})"
+    # Spread Guard (1.0 Pip)
+    if (spread / price * 10000) > 1.0: return "SKIP", price, "Spread Too High", 0
 
     prompt = (
-        f"FORCE BIAS: {bias} (EMA20:{round(e20,1)} vs EMA50:{round(e50,1)}). "
-        f"1m POSITION: {pos} EMAs. RSI: {round(rsi,1)}. SPREAD: {round(spread,2)}. "
-        f"CANDLE: O:{last_c['o']} C:{last_c['c']}. "
-        f"TASK: Verify {bias} Setup. Rules: Pullback to EMAs + RSI 40-60 + Candle Confirmation. "
-        f"DECIDE: {bias} or WAIT. Format: [SIDE] | [REASON]"
+        f"BIAS: {bias}. RSI: {round(rsi,1)}. PRICE: {price}. "
+        f"LAST CANDLE: O:{last_c['o']} C:{last_c['c']}. "
+        f"TASK: Rate setup 0-100. Need Pullback + RSI 40-60. "
+        f"OUTPUT: [SIDE/SKIP] | [SCORE] | [REASON 5 WORDS]"
     )
 
     try:
-        response = groq_client.chat.completions.create(
+        res = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.3-70b-versatile",
-        )
-        res = response.choices[0].message.content.strip().upper()
-        if "WAIT" in res: return "WAIT", price, "Condition mismatch"
+        ).choices[0].message.content.strip().upper()
         
-        side = "BUY" if "BUY" in res else "SELL"
-        reason = res.split("|")[-1] if "|" in res else "Bias Confirmed"
-        return side, price, reason
+        parts = res.split("|")
+        side = parts[0].strip()
+        score = int(''.join(filter(str.isdigit, parts[1]))) if len(parts) > 1 else 0
+        reason = parts[2].strip() if len(parts) > 2 else "Market Scan"
+        
+        if score < 45 or "SKIP" in side: return "SKIP", price, reason, score
+        return side, price, reason, score
     except: return None
 
-# --- 4. EXECUTION ---
-
+# --- 4. EXECUTION & TRUE RECOVERY ---
 def trade_engine(chat_id):
     u = get_user(chat_id)
     while u["is_trading"]:
         try:
             if u["active_trade"] is None:
-                side, price, reason = get_ai_sniper_v8(u["symbol"], chat_id)
-                if not side or side == "WAIT":
-                    time.sleep(5)
-                    continue
+                # Stop if balance is too low
+                if u["balance"] < u["current_stake"]:
+                    bot.send_message(chat_id, "⚠️ **BANKRUPT!** Balance zero ya low hai. /reset karein.")
+                    u["is_trading"] = False; break
+
+                side, price, reason, score = get_ai_v10(u["symbol"], chat_id)
+                if not side or side == "SKIP":
+                    time.sleep(5); continue
                 
-                # Scalp: 5-8 Pips
-                tp_dist = 6.0 if "BTC" in u["symbol"] else 0.4
+                # 1:1 RR Setup (Approx 10 Pips)
+                tp_dist = 10.0 if "BTC" in u["symbol"] else 0.8
                 tp = price + tp_dist if side == "BUY" else price - tp_dist
-                sl = price - (tp_dist * 2) if side == "BUY" else price + (tp_dist * 2)
+                sl = price - tp_dist if side == "BUY" else price + tp_dist
 
                 u["active_trade"] = {"side": side, "entry": price, "tp": tp, "sl": sl, "stake": u["current_stake"]}
                 u["balance"] -= u["current_stake"]
-                bot.send_message(chat_id, f"🔫 **V8 ENTRY: {side}**\nPrice: {price}\nBias Reason: {reason}")
+                bot.send_message(chat_id, f"🎯 **ENTRY: {side} ({score}%)**\nReason: {reason}\nStake: ${round(u['current_stake'],2)}")
 
             else:
                 curr = market.fetch_ticker(u["symbol"])['last']
@@ -125,54 +114,73 @@ def trade_engine(chat_id):
                 loss = ("BUY" in t['side'] and curr <= t['sl']) or ("SELL" in t['side'] and curr >= t['sl'])
 
                 if win:
-                    profit = t['stake'] * 0.15
-                    u["balance"] += (t['stake'] + profit)
-                    u["pnl"] += profit
+                    # TRUE RECOVERY: Stake + All Lost + 10% Profit
+                    profit = t['stake'] + u["total_lost"] + (u["initial_stake"] * 0.1)
+                    u["balance"] += profit
                     u["wins"] += 1
+                    u["total_lost"] = 0
                     u["current_stake"] = u["initial_stake"]
-                    bot.send_message(chat_id, f"✅ **WIN!** +${round(profit, 2)}\nBalance: ${round(u['balance'], 2)}")
+                    bot.send_message(chat_id, f"✅ **WIN!** Loss cover ho gaya.\nBalance: ${round(u['balance'], 2)}")
                     u["active_trade"] = None
                 elif loss:
-                    u["pnl"] -= t['stake']
+                    u["total_lost"] += t['stake']
                     u["losses"] += 1
-                    u["current_stake"] *= 2.0
-                    bot.send_message(chat_id, f"❌ **LOSS.** Next Stake: ${u['current_stake']}")
+                    # Recovery Formula: Next Stake must cover total loss
+                    u["current_stake"] = (u["total_lost"] + u["initial_stake"]) * 1.5 
+                    bot.send_message(chat_id, f"❌ **LOSS.** Next stake: ${round(u['current_stake'],2)}")
                     u["active_trade"] = None
             
             time.sleep(3)
         except: time.sleep(5)
 
-# --- 5. COMMANDS ---
+# --- 5. ALL COMMANDS ---
+@bot.message_handler(commands=['start', 'help'])
+def help_cmd(message):
+    h = ("🤖 **AI SNIPER V10 HELP**\n\n"
+         "/trade - Engine chalu karein\n"
+         "/stop - Trading band karein\n"
+         "/status - PnL aur Win rate dekhein\n"
+         "/check - API connection test\n"
+         "/reset - Wallet reset $10k")
+    bot.reply_to(message, h)
+
+@bot.message_handler(commands=['check'])
+def check(m):
+    try:
+        market.fetch_ticker('BTC/USD')
+        groq_client.chat.completions.create(messages=[{"role":"user","content":"Hi"}], model="llama-3.3-70b-versatile")
+        bot.reply_to(m, "✅ **SYSTEM READY:** Kraken aur Groq connected hain.")
+    except Exception as e: bot.reply_to(m, f"❌ **ERROR:** {e}")
 
 @bot.message_handler(commands=['status'])
-def status(message):
-    u = get_user(message.chat.id)
-    rate = (u['wins'] / (u['wins'] + u['losses']) * 100) if (u['wins'] + u['losses']) > 0 else 0
-    bot.send_message(message.chat.id, f"📊 **V8 MECHANICAL STATUS**\nWin Rate: {round(rate,1)}%\nWins: {u['wins']} | Losses: {u['losses']}\nNext Stake: ${u['current_stake']}")
-
-@bot.message_handler(commands=['trade'])
-def start_v8(message):
-    m = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
-    m.add("BTC/USD", "ETH/USD")
-    msg = bot.send_message(message.chat.id, "Select Asset:", reply_markup=m)
-    bot.register_next_step_handler(msg, lambda m: bot.register_next_step_handler(bot.send_message(m.chat.id, "Base Stake:"), lambda s: launch(m, s)))
-
-def launch(m, s):
+def status(m):
     u = get_user(m.chat.id)
-    u["symbol"], u["initial_stake"], u["current_stake"], u["is_trading"] = m.text, float(s.text), float(s.text), True
-    bot.send_message(m.chat.id, "🌪️ **MECHANICAL V8 ENGINE LIVE**")
-    threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
+    rate = (u['wins'] / (u['wins'] + u['losses']) * 100) if (u['wins'] + u['losses']) > 0 else 0
+    bot.send_message(m.chat.id, f"📊 **STATS**\nBal: ${round(u['balance'],2)}\nWins: {u['wins']} | Losses: {u['losses']}\nWin Rate: {round(rate,1)}%\nTotal Lost: ${round(u['total_lost'],2)}")
 
 @bot.message_handler(commands=['reset'])
-def reset_u(message):
-    users[message.chat.id] = {"balance": 10000.0, "pnl": 0.0, "wins": 0, "losses": 0, "initial_stake": 50.0, "current_stake": 50.0, "active_trade": None, "is_trading": False, "symbol": "BTC/USD"}
-    bot.reply_to(message, "🔄 Reset to $10k.")
+def reset(m):
+    users[m.chat.id] = {"balance": 10000.0, "total_lost": 0.0, "wins": 0, "losses": 0, "initial_stake": 50.0, "current_stake": 50.0, "active_trade": None, "is_trading": False, "symbol": "BTC/USD"}
+    bot.reply_to(m, "🔄 **Reset Complete.** Balance: $10,000")
+
+@bot.message_handler(commands=['trade'])
+def trade(m):
+    kb = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
+    kb.add("BTC/USD", "ETH/USD")
+    msg = bot.send_message(m.chat.id, "Asset select karein:", reply_markup=kb)
+    bot.register_next_step_handler(msg, lambda msg: bot.register_next_step_handler(bot.send_message(m.chat.id, "Stake (e.g. 50):"), lambda s: start_v10(msg, s)))
+
+def start_v10(m, s):
+    u = get_user(m.chat.id)
+    u["symbol"], u["initial_stake"], u["current_stake"], u["is_trading"] = m.text, float(s.text), float(s.text), True
+    bot.send_message(m.chat.id, "🚀 **V10 ENGINE STARTED**")
+    threading.Thread(target=trade_engine, args=(m.chat.id,), daemon=True).start()
 
 @bot.message_handler(commands=['stop'])
 def stop(m): get_user(m.chat.id)["is_trading"] = False; bot.send_message(m.chat.id, "🛑 Stopped.")
 
 @app.route('/')
-def h(): return "V8 Sniper Online", 200
+def h(): return "V10 Online", 200
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000))), daemon=True).start()
