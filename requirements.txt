@@ -2,3 +2,5 @@ pyTelegramBotAPI
 ccxt
 groq
 flask
+numpy
+
