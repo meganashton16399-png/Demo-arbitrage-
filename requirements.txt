@@ -1,7 +1,5 @@
-pyTelegramBotAPI
-ccxt
-groq
-flask
-pandas
-numpy
-
+pyTelegramBotAPI==4.16.1
+ccxt==4.4.80
+groq==0.13.0
+Flask==3.0.3
+pandas==2.2.3
